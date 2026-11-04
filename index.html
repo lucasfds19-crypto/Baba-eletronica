@@ -1,82 +1,109 @@
 <!DOCTYPE html>
-<html lang="pt-br">
+<html lang="pt">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Babá Eletrônica - Ao Vivo</title>
+    <title>Babá Eletrônica - Visualizador</title>
     <style>
-        body { font-family: sans-serif; background: #121212; color: #fff; text-align: center; margin: 0; padding: 20px; }
-        video { width: 100%; max-width: 600px; border-radius: 12px; border: 2px solid #00ff88; background: #000; margin-top: 15px; }
-        .status { margin-top: 10px; font-weight: bold; color: #ffcc00; }
+        body {
+            margin: 0;
+            background: #000;
+            color: #fff;
+            font-family: Arial, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+        }
+        video {
+            width: 100%;
+            max-width: 800px;
+            height: auto;
+            background: #222;
+            border-radius: 8px;
+        }
+        #status {
+            margin-top: 15px;
+            font-size: 16px;
+            color: #00FFCC;
+        }
     </style>
-
-    <!-- SDK do Firebase (Versão Web) -->
-    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-app.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/8.10.1/firebase-database.js"></script>
 </head>
 <body>
 
-    <h2>Babá Eletrônica - Monitoramento</h2>
-    <div id="status" class="status">Aguardando sinal da câmera...</div>
+    <h2>Babá Eletrônica - Em Direto</h2>
     <video id="remoteVideo" autoplay playsinline controls></video>
+    <div id="status">A aguardar ligação com a câmara...</div>
+
+    <!-- Firebase SDK (Compat version) -->
+    <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.22.2/firebase-database-compat.js"></script>
 
     <script>
-        // Configuração do Firebase (Substituiremos pelas suas chaves na Parte 2)
+        // Configuração do Firebase
         const firebaseConfig = {
-            databaseURL: "HTTPS://SEU-PROJETO-DEFAULT-RTDB.FIREBASEIO.COM"
+            databaseURL: "https://babaeletronicalks-default-rtdb.firebaseio.com/"
         };
+
         firebase.initializeApp(firebaseConfig);
         const db = firebase.database();
 
-        // Obtém o ID da Sala a partir do final da URL (ex: #baba-1234)
+        // Obter o ID da sala a partir do hash do URL (ex: #baba-1a2b3c4d)
         const idSala = window.location.hash.substring(1);
-        const statusDiv = document.getElementById('status');
-        const remoteVideo = document.getElementById('remoteVideo');
+        const statusDiv = document.getElementById("status");
+        const remoteVideo = document.getElementById("remoteVideo");
 
         if (!idSala) {
-            statusDiv.innerText = "Erro: Nenhuma sala especificada no link.";
+            statusDiv.innerText = "Erro: Nenhuma sala especificada no URL (ex: index.html#baba-xyz)";
         } else {
-            iniciarWebRTC(idSala);
-        }
-
-        function iniciarWebRTC(sala) {
-            const rtcConfig = {
-                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+            statusDiv.innerText = "A ligar à sala: " + idSala;
+            
+            const salaRef = db.ref("salas/" + idSala);
+            
+            const pcConfig = {
+                iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
             };
-            const pc = new RTCPeerConnection(rtcConfig);
-            const salaRef = db.ref('salas/' + sala);
+
+            const pc = new RTCPeerConnection(pcConfig);
 
             pc.ontrack = (event) => {
+                console.log("Stream remoto recebido!");
                 remoteVideo.srcObject = event.streams[0];
-                statusDiv.innerText = "Ao Vivo 🔴";
-                statusDiv.style.color = "#00ff88";
+                statusDiv.innerText = "🔴 Transmissão em direto ativa!";
             };
 
-            // Ouve as Ofertas (SDP) enviadas pela câmera em Java
-            salaRef.child('oferta').on('value', async (snapshot) => {
-                const oferta = snapshot.val();
-                if (oferta && !pc.currentRemoteDescription) {
-                    await pc.setRemoteDescription(new RTCSessionDescription(oferta));
-                    const resposta = await pc.createAnswer();
-                    await pc.setLocalDescription(resposta);
-                    salaRef.child('resposta').set(resposta);
-                }
-            });
-
-            // Recebe os candidatos de rede (ICE) da câmera
-            salaRef.child('candidatosCamera').on('child_added', (snapshot) => {
-                const candidato = snapshot.val();
-                if (candidato) {
-                    pc.addIceCandidate(new RTCIceCandidate(candidato));
-                }
-            });
-
-            // Envia os candidatos de rede do navegador de volta para a câmera
             pc.onicecandidate = (event) => {
                 if (event.candidate) {
-                    salaRef.child('candidatosViewer').push(event.candidate.toJSON());
+                    salaRef.child("calleeCandidates").push(event.candidate.toJSON());
                 }
             };
+
+            // Ouvir a Oferta (Offer) enviada pela aplicação Android
+            salaRef.child("offer").on("value", async (snapshot) => {
+                const offer = snapshot.val();
+                if (offer && !pc.currentRemoteDescription) {
+                    statusDiv.innerText = "A estabelecer conexão WebRTC...";
+                    await pc.setRemoteDescription(new RTCSessionDescription(offer));
+
+                    const answer = await pc.createAnswer();
+                    await pc.setLocalDescription(answer);
+
+                    await salaRef.child("answer").setValue({
+                        type: answer.type,
+                        sdp: answer.sdp
+                    });
+                    statusDiv.innerText = "Resposta enviada, a aguardar vídeo...";
+                }
+            });
+
+            // Ouvir candidatos ICE do Android
+            salaRef.child("callerCandidates").on("child_added", (snapshot) => {
+                const candidate = snapshot.val();
+                if (candidate) {
+                    pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e => console.error(e));
+                }
+            });
         }
     </script>
 </body>
